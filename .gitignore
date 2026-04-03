@@ -1,0 +1,30 @@
+# ─── Python ─────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# ─── Node ──────────────────────────────────────────────────────
+node_modules/
+dist/
+
+# ─── Environment & Secrets ─────────────────────────────────────
+.env
+!.env.example
+
+# ─── Data (generated at runtime) ───────────────────────────────
+backend/data/chroma/
+backend/data/copilot.db
+backend/data/copilot_checkpoints.db
+backend/data/rag_chunks.json
+
+# ─── Local tool config ─────────────────────────────────────────
+.claude/settings.local.json
+
+# ─── IDE / OS ──────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
