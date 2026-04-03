@@ -1,5 +1,6 @@
-# 燃气抢险智能副驾 (Gas Emergency Copilot)
+# 燃气抢险智能副驾 (Gas Emergency Copilot) · gasExpert
 
+> 燃气管道泄漏事故的应急处置方案生成  
 > 基于 LangGraph + DeepSeek + RAG 的燃气抢险辅助决策系统
 
 ---
