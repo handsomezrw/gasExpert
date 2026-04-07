@@ -167,3 +167,8 @@ gas-copilot/
 | `LANGCHAIN_API_KEY` | LangSmith API Key | — |
 | `RAG_ENABLE_RERANKER` | 启用 BGE 重排序 | `false` |
 | `LOG_FORMAT` | 强制 JSON 日志 | 自动检测 |
+
+<img width="2277" height="1394" alt="image" src="https://github.com/user-attachments/assets/756a8065-8eff-422b-821a-e10c30c814eb" />
+<img width="2345" height="1399" alt="image" src="https://github.com/user-attachments/assets/46f26485-b272-43a9-9b1e-89ca4db05be0" />
+
+
