@@ -18,6 +18,7 @@ backend/data/chroma/
 backend/data/copilot.db
 backend/data/copilot_checkpoints.db
 backend/data/rag_chunks.json
+backend/data/cases/*
 
 # ─── Local tool config ─────────────────────────────────────────
 .claude/settings.local.json
@@ -28,3 +29,4 @@ backend/data/rag_chunks.json
 *.swp
 .DS_Store
 Thumbs.db
+*.md

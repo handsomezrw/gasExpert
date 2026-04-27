@@ -1,10 +1,11 @@
 import { useEffect, useRef } from "react";
 import { Flame } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
+import { useOverlayStore } from "@/stores/overlayStore";
 import { streamChat } from "@/services/sse";
 import { MessageItem } from "./MessageItem";
 import { ChatInput } from "./ChatInput";
-import type { ChatMessage } from "@/types";
+import type { ChatMessage, PanelData } from "@/types";
 
 const SUGGESTIONS = [
   { icon: "📏", title: "计算疏散范围", text: "成都武侯区发生天然气泄漏，管径DN200，压力0.4MPa，请计算疏散范围" },
@@ -77,7 +78,18 @@ export function ChatWindow() {
           timestamp: tc.timestamp,
         });
       },
-      onPanelData: (pd) => addPanelDataToLast(pd),
+      onPanelData: (pd: PanelData) => {
+        addPanelDataToLast(pd);
+        // Phase 6.2: update overlay store for map sync tracking
+        if (pd.type === "evacuation" || pd.type === "report") {
+          const layerType = pd.type === "evacuation" ? "evacuation_zone" as const : "repair_plan" as const;
+          useOverlayStore.getState().pushOverlay({
+            layerType,
+            title: pd.type === "evacuation" ? "疏散范围" : "抢修方案",
+            status: "pending",
+          });
+        }
+      },
       onError: (err) => appendToLastAssistant(`\n\n> ⚠️ 错误: ${err}`),
       onDone: () => setStreaming(false),
     });

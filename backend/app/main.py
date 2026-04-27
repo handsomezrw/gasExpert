@@ -20,6 +20,11 @@ async def lifespan(app: FastAPI):
 
     Path("./data").mkdir(parents=True, exist_ok=True)
 
+    from app.memory.database import init_db, init_engine
+
+    init_engine()
+    await init_db()
+
     from app.agent.graph import build_graph
     from app.memory.checkpointer import get_sqlite_checkpointer
 
@@ -39,6 +44,10 @@ async def lifespan(app: FastAPI):
         )
         yield
         logger.info("shutdown")
+        from app.memory.database import engine as db_engine
+
+        if db_engine is not None:
+            await db_engine.dispose()
 
 
 def create_app() -> FastAPI:

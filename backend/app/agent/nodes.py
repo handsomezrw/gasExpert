@@ -1,4 +1,5 @@
 """LangGraph node implementations with real LLM calls."""
+from __future__ import annotations
 
 import json
 
@@ -12,6 +13,7 @@ from app.agent.prompts import (
     RESPONDER_SYSTEM,
 )
 from app.agent.state import AgentState
+from app.skills import SkillRegistry
 from app.tools import TOOL_MAP, get_tool_descriptions
 
 logger = structlog.get_logger()
@@ -27,6 +29,7 @@ async def planner_node(state: AgentState) -> dict:
 
     system_prompt = PLANNER_SYSTEM_TEMPLATE.format(
         tool_descriptions=get_tool_descriptions(),
+        skill_descriptions=SkillRegistry.describe_for_planner(),
     )
 
     # Append already-collected context so the planner doesn't repeat work
@@ -35,6 +38,11 @@ async def planner_node(state: AgentState) -> dict:
         context_parts.append(
             "### 已有工具调用结果\n"
             + json.dumps(state["tool_results"], ensure_ascii=False, indent=2)
+        )
+    if state.get("skill_results"):
+        context_parts.append(
+            "### 已有技能执行结果\n"
+            + json.dumps(state["skill_results"], ensure_ascii=False, indent=2)
         )
     if state.get("retrieved_docs"):
         context_parts.append(
@@ -76,6 +84,8 @@ def route_decision(state: AgentState) -> str:
     plan = state.get("current_plan", "direct_answer")
     if plan == "use_tools":
         return "use_tools"
+    if plan == "use_skills":
+        return "use_skills"
     if plan == "need_rag":
         return "need_rag"
     return "direct_answer"
@@ -110,6 +120,42 @@ async def tool_executor_node(state: AgentState) -> dict:
             results.append({"tool": name, "args": args, "error": str(exc)})
 
     return {"tool_results": results}
+
+
+# ── Skill Executor (Phase 6.1) ───────────────────────────────────────
+
+async def skill_executor_node(state: AgentState) -> dict:
+    """Execute skills specified by the planner (virtual tools routed to subgraphs)."""
+    planner_output = state.get("planner_output") or {}
+    tool_calls = planner_output.get("tool_calls") or []
+
+    skill_results: list[dict] = list(state.get("skill_results") or [])
+
+    for tc in tool_calls:
+        name = tc.get("name", "")
+        args = tc.get("args", {})
+        skill_cls = SkillRegistry.get(name)
+
+        if skill_cls is None:
+            logger.warning("unknown_skill", name=name)
+            skill_results.append({"skill": name, "error": f"未知技能: {name}"})
+            continue
+
+        try:
+            logger.info("skill_exec_start", name=name, args=args)
+            skill = skill_cls()
+            result = await skill.ainvoke(args)
+            skill_results.append({
+                "skill": name,
+                "args": args,
+                "result": result.model_dump(),
+            })
+            logger.info("skill_exec_done", name=name)
+        except Exception as exc:
+            logger.error("skill_exec_fail", name=name, error=str(exc))
+            skill_results.append({"skill": name, "args": args, "error": str(exc)})
+
+    return {"skill_results": skill_results}
 
 
 # ── RAG Retriever ─────────────────────────────────────────────────────
@@ -204,6 +250,11 @@ async def responder_node(state: AgentState) -> dict:
         context_parts.append(
             "### 工具调用结果\n"
             + json.dumps(state["tool_results"], ensure_ascii=False, indent=2)
+        )
+    if state.get("skill_results"):
+        context_parts.append(
+            "### 技能执行结果\n"
+            + json.dumps(state["skill_results"], ensure_ascii=False, indent=2)
         )
     if state.get("retrieved_docs"):
         context_parts.append(

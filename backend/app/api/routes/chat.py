@@ -13,6 +13,7 @@ import time
 import uuid
 from typing import AsyncGenerator
 
+import asyncio
 import structlog
 from fastapi import APIRouter, Depends, Request
 from langchain_core.messages import HumanMessage
@@ -21,9 +22,102 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.api.deps import get_app_settings
 from app.config import Settings
+from app.memory import repository as repo
+from app.memory.database import session_factory
 
 router = APIRouter()
 logger = structlog.get_logger()
+
+
+# ── DB persistence (parallel to LangGraph checkpoint) ────────────────
+
+
+def _title_from_first_message(text: str) -> str:
+    t = text.strip()
+    if len(t) <= 24:
+        return t
+    return t[:24] + "..."
+
+
+class _ToolCallMerge:
+    """Mirror front-end merge: tool_start rows updated by tool_end."""
+
+    def __init__(self) -> None:
+        self.items: list[dict] = []
+
+    def add_start(self, data: dict) -> None:
+        self.items.append({
+            "id": data.get("id", ""),
+            "name": data.get("name", ""),
+            "args": data.get("args") or {},
+            "result": data.get("result"),
+            "status": data.get("status", "running"),
+            "timestamp": data.get("timestamp", _ts()),
+        })
+
+    def end(self, data: dict) -> None:
+        name = data.get("name", "")
+        for i in range(len(self.items) - 1, -1, -1):
+            if self.items[i]["name"] == name and self.items[i]["status"] == "running":
+                self.items[i]["status"] = data.get("status", "done")
+                self.items[i]["result"] = data.get("result")
+                self.items[i]["timestamp"] = data.get("timestamp", _ts())
+                break
+
+
+def _persist_from_yield(sse_dict: dict, ctx: dict | None) -> None:
+    if ctx is None:
+        return
+    try:
+        ev = sse_dict.get("event", "")
+        raw = sse_dict.get("data", "{}")
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        if ev == "token":
+            ctx["assistant"] += payload.get("content", "")
+        elif ev == "tool_start":
+            ctx["tool_merge"].add_start(payload)
+        elif ev == "tool_end":
+            ctx["tool_merge"].end(payload)
+        elif ev == "panel_data":
+            ctx["panels"].append({
+                "type": payload.get("type"),
+                "data": payload.get("data") or {},
+            })
+    except Exception:
+        pass
+
+
+async def _save_user_turn(session_id: str, message: str) -> None:
+    factory = session_factory()
+    title = _title_from_first_message(message)
+    try:
+        async with factory() as db:
+            await repo.ensure_conversation_session(db, session_id, title=title)
+            await repo.add_message(db, session_id, "user", message)
+            await db.commit()
+    except Exception as exc:
+        logger.error("persist_user_failed", error=str(exc), session_id=session_id)
+
+
+async def _save_assistant_turn(session_id: str, ctx: dict) -> None:
+    factory = session_factory()
+    extra: dict = {}
+    if ctx["tool_merge"].items:
+        extra["toolCalls"] = ctx["tool_merge"].items
+    if ctx["panels"]:
+        extra["panelData"] = ctx["panels"]
+    try:
+        async with factory() as db:
+            await repo.add_message(
+                db,
+                session_id,
+                "assistant",
+                ctx["assistant"],
+                extra=extra if extra else None,
+            )
+            await db.commit()
+    except Exception as exc:
+        logger.error("persist_assistant_failed", error=str(exc), session_id=session_id)
 
 
 # ── Request / Response models ────────────────────────────────────────
@@ -54,12 +148,48 @@ def _build_input(message: str) -> dict:
         "current_plan": "",
         "planner_output": {},
         "tool_results": [],
+        "skill_results": [],
         "retrieved_docs": [],
         "final_report": None,
         "iteration_count": 0,
     }
 
 
+
+# ── Map overlay push (Phase 6.2) ───────────────────────────────────
+
+
+async def _maybe_push_overlay(skill_name: str, result_data: dict, session_id: str) -> None:
+    """Auto-push GeoJSON overlay to the Web map when a skill completes."""
+    geojson = None
+    layer_type = None
+    title = ""
+    if skill_name == "diffusion_zone" and result_data.get("geojson"):
+        geojson = result_data["geojson"]
+        layer_type = "evacuation_zone"
+        title = "疏散范围"
+    elif skill_name == "valve_isolation" and result_data.get("feasible"):
+        # Build a lightweight GeoJSON from valve sequence
+        features = []
+        for v in result_data.get("valve_sequence", []):
+            features.append({
+                "type": "Feature",
+                "properties": {"id": v["valve_id"], "label": v.get("label", ""),
+                                "action": v["action"], "method": v.get("method", "")},
+                "geometry": {"type": "Point", "coordinates": [0, 0]},
+            })
+        if features:
+            geojson = {"type": "FeatureCollection", "features": features}
+            layer_type = "valve_isolation"
+            title = "关阀方案"
+
+    if geojson and layer_type:
+        try:
+            from app.integrations import WebMapClient
+            client = WebMapClient()
+            await client.push_overlay(session_id, geojson, layer_type, title=title)
+        except Exception as exc:
+            logger.warning("overlay_push_failed", skill=skill_name, error=str(exc))
 # ── Panel data mapping ──────────────────────────────────────────────
 
 _PANEL_MAP = {
@@ -67,6 +197,9 @@ _PANEL_MAP = {
     "query_material_inventory": "inventory",
     "get_weather_info": "weather",
     "generate_report": "report",
+    "valve_isolation": "evacuation",
+    "diffusion_zone": "evacuation",
+    "repair_plan": "report",
 }
 
 
@@ -164,6 +297,34 @@ async def _stream_events(
                     if panel:
                         yield panel
 
+            # ── Skill executor completed (Phase 6.1) ──────────────
+            elif kind == "on_chain_end" and node == "skill_executor":
+                out = ev["data"].get("output")
+                if not isinstance(out, dict) or "skill_results" not in out:
+                    continue
+                for sr in out["skill_results"]:
+                    has_err = "error" in sr
+                    result_data = sr.get("result", {})
+                    yield _sse("tool_end", {
+                        "id": _uid(),
+                        "name": sr.get("skill", "unknown"),
+                        "args": sr.get("args", {}),
+                        "status": "error" if has_err else "done",
+                        "result": result_data,
+                        "timestamp": _ts(),
+                    })
+                    skill_name = sr.get("skill", "")
+                    panel_type = _PANEL_MAP.get(skill_name)
+                    if panel_type and result_data:
+                        yield _sse("panel_data", {
+                            "type": panel_type,
+                            "data": {"skill": skill_name, **result_data},
+                        })
+                    # Phase 6.2: auto-push overlay to Web map
+                    _ = asyncio.ensure_future(
+                        _maybe_push_overlay(skill_name, result_data, session_id)
+                    )
+
             # ── RAG retriever completed ───────────────────────────
             elif kind == "on_chain_end" and node == "rag_retriever":
                 out = ev["data"].get("output")
@@ -250,6 +411,30 @@ async def _stream_updates(
                         if panel:
                             yield panel
 
+                elif node_name == "skill_executor":
+                    for sr in out.get("skill_results") or []:
+                        has_err = "error" in sr
+                        result_data = sr.get("result", {})
+                        yield _sse("tool_end", {
+                            "id": _uid(),
+                            "name": sr.get("skill", "unknown"),
+                            "args": sr.get("args", {}),
+                            "status": "error" if has_err else "done",
+                            "result": result_data,
+                            "timestamp": _ts(),
+                        })
+                        skill_name = sr.get("skill", "")
+                        panel_type = _PANEL_MAP.get(skill_name)
+                        if panel_type and result_data:
+                            yield _sse("panel_data", {
+                                "type": panel_type,
+                                "data": {"skill": skill_name, **result_data},
+                            })
+                        # Phase 6.2: auto-push overlay to Web map
+                        _ = asyncio.ensure_future(
+                            _maybe_push_overlay(skill_name, result_data, session_id)
+                        )
+
                 elif node_name == "rag_retriever":
                     docs = out.get("retrieved_docs") or []
                     yield _sse("tool_end", {
@@ -289,10 +474,19 @@ async def _event_generator(
     sid = request.session_id or _uid()
     logger.info("sse_start", session_id=sid, message=request.message[:80])
 
+    persist_ctx = {
+        "assistant": "",
+        "tool_merge": _ToolCallMerge(),
+        "panels": [],
+    }
+
+    await _save_user_turn(sid, request.message)
+
     use_fallback = False
     primary = _stream_events(request.message, sid, graph)
     try:
         first_ev = await primary.__anext__()
+        _persist_from_yield(first_ev, persist_ctx)
         yield first_ev
     except Exception as exc:
         logger.warning("astream_events_unavailable", error=str(exc))
@@ -300,10 +494,14 @@ async def _event_generator(
 
     if not use_fallback:
         async for ev in primary:
+            _persist_from_yield(ev, persist_ctx)
             yield ev
     else:
         async for ev in _stream_updates(request.message, sid, graph):
+            _persist_from_yield(ev, persist_ctx)
             yield ev
+
+    await _save_assistant_turn(sid, persist_ctx)
 
 
 @router.post("/stream")

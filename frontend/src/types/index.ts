@@ -16,8 +16,10 @@ export interface ToolCallEvent {
   timestamp: number;
 }
 
+export type PanelType = "evacuation" | "inventory" | "weather" | "report" | "map_overlay";
+
 export interface PanelData {
-  type: "evacuation" | "inventory" | "weather" | "report";
+  type: PanelType;
   data: Record<string, unknown>;
 }
 

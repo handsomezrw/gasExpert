@@ -1,4 +1,8 @@
-"""LangGraph core state graph definition."""
+"""LangGraph core state graph definition.
+
+Phase 6.1: added skill_executor node for composite workflow skills.
+"""
+from __future__ import annotations
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, StateGraph
@@ -10,6 +14,7 @@ from app.agent.nodes import (
     reflector_node,
     responder_node,
     route_decision,
+    skill_executor_node,
     tool_executor_node,
 )
 from app.agent.state import AgentState
@@ -24,6 +29,7 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None):
 
     builder.add_node("planner", planner_node)
     builder.add_node("tool_executor", tool_executor_node)
+    builder.add_node("skill_executor", skill_executor_node)
     builder.add_node("rag_retriever", rag_retriever_node)
     builder.add_node("reflector", reflector_node)
     builder.add_node("responder", responder_node)
@@ -35,11 +41,13 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None):
         route_decision,
         {
             "use_tools": "tool_executor",
+            "use_skills": "skill_executor",
             "need_rag": "rag_retriever",
             "direct_answer": "responder",
         },
     )
     builder.add_edge("tool_executor", "reflector")
+    builder.add_edge("skill_executor", "reflector")
     builder.add_edge("rag_retriever", "reflector")
     builder.add_conditional_edges(
         "reflector",

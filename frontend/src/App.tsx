@@ -1,11 +1,19 @@
+import { useEffect } from "react";
 import { PanelLeft } from "lucide-react";
 import { Sidebar } from "@/components/Sidebar";
 import { ChatWindow } from "@/components/chat/ChatWindow";
+import { MapSyncStatus } from "@/components/panels/MapSyncStatus";
 import { useChatStore } from "@/stores/chatStore";
 
 export function App() {
   const sidebarOpen = useChatStore((s) => s.sidebarOpen);
   const toggleSidebar = useChatStore((s) => s.toggleSidebar);
+  const hydrateFromServer = useChatStore((s) => s.hydrateFromServer);
+  /* overlays access: useOverlayStore.getState().overlays */
+
+  useEffect(() => {
+    void hydrateFromServer();
+  }, [hydrateFromServer]);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background">
@@ -22,6 +30,9 @@ export function App() {
             <PanelLeft className="h-5 w-5" />
           </button>
           <h1 className="text-sm font-semibold">燃气抢险智能副驾</h1>
+          <div className="ml-auto flex items-center gap-2">
+            <MapSyncStatus />
+          </div>
         </header>
 
         <ChatWindow />

@@ -10,7 +10,9 @@ class Base(DeclarativeBase):
     pass
 
 
-class Session(Base):
+class ConversationSession(Base):
+    """A chat thread (maps to frontend session id)."""
+
     __tablename__ = "sessions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)

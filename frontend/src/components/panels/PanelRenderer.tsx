@@ -1,6 +1,7 @@
 import type { PanelData } from "@/types";
 import { EvacuationPanel } from "./EvacuationPanel";
 import { InventoryPanel } from "./InventoryPanel";
+import { MapSyncStatus } from "./MapSyncStatus";
 import { WeatherPanel } from "./WeatherPanel";
 import { ReportPanel } from "./ReportPanel";
 
@@ -19,6 +20,7 @@ export function PanelRenderer({ panels }: Props) {
           {panel.type === "inventory" && <InventoryPanel data={panel.data} />}
           {panel.type === "weather" && <WeatherPanel data={panel.data} />}
           {panel.type === "report" && <ReportPanel data={panel.data} />}
+          {panel.type === "map_overlay" && <MapSyncStatus />}
         </div>
       ))}
     </div>
