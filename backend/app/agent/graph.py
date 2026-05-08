@@ -8,6 +8,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, StateGraph
 
 from app.agent.nodes import (
+    case_recall_node,
     check_completeness,
     planner_node,
     rag_retriever_node,
@@ -27,6 +28,7 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None):
     """
     builder = StateGraph(AgentState)
 
+    builder.add_node("case_recall", case_recall_node)
     builder.add_node("planner", planner_node)
     builder.add_node("tool_executor", tool_executor_node)
     builder.add_node("skill_executor", skill_executor_node)
@@ -34,7 +36,8 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None):
     builder.add_node("reflector", reflector_node)
     builder.add_node("responder", responder_node)
 
-    builder.set_entry_point("planner")
+    builder.set_entry_point("case_recall")
+    builder.add_edge("case_recall", "planner")
 
     builder.add_conditional_edges(
         "planner",

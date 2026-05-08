@@ -3,19 +3,42 @@ from __future__ import annotations
 
 from typing import Literal, TypedDict
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from app.skills.base import SkillInput, SkillOutput
+
+_SEVERITY_VALUES = {"pinhole", "crack", "rupture"}
+
+_SEVERITY_ALIASES: dict[str, str] = {
+    "hole": "pinhole", "small": "pinhole", "tiny": "pinhole",
+    "moderate": "crack", "medium": "crack", "mid": "crack",
+    "cracked": "crack",
+    "burst": "rupture", "large": "rupture", "big": "rupture",
+    "major": "rupture",
+}
 
 
 class ValveIsolationInput(SkillInput):
     """Skill input: leak point + pipeline context."""
     leak_point_id: str = Field(description="泄漏点唯一标识")
     pipeline_id: str = Field(description="泄漏管段 ID")
-    severity: Literal["pinhole", "crack", "rupture"] = Field(description="泄漏严重程度")
+    severity: str = Field(description="泄漏严重程度: pinhole / crack / rupture")
     pressure: float | None = Field(None, description="管道压力 (MPa)")
     diameter: float | None = Field(None, description="管道直径 (mm)")
     location: str | None = Field(None, description="位置描述")
+
+    @field_validator("severity", mode="before")
+    @classmethod
+    def _normalize_severity(cls, v: str) -> str:
+        v = str(v).strip().lower()
+        if v in _SEVERITY_VALUES:
+            return v
+        if v in _SEVERITY_ALIASES:
+            return _SEVERITY_ALIASES[v]
+        for canonical in _SEVERITY_VALUES:
+            if canonical in v:
+                return canonical
+        return "crack"
 
 
 class ValveIsolationOutput(SkillOutput):

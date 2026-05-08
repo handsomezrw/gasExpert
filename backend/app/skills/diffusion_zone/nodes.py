@@ -143,6 +143,31 @@ def generate_zones_node(state: dict) -> dict:
     return {"zones_raw": zones}
 
 
+# ── Helper: circle polygon ──────────────────────────────────────────────
+
+def _circle_polygon(center_lng: float, center_lat: float, radius_m: float, num_points: int = 48) -> list[list[float]]:
+    """Generate a GeoJSON Polygon ring approximating a circle on the ground.
+
+    Uses an equirectangular approximation (fine for city-scale radii < 5 km).
+    """
+    import math
+    # 1 degree latitude ≈ 111320 m
+    lat_deg_per_m = 1.0 / 111320.0
+    lng_deg_per_m = 1.0 / (111320.0 * math.cos(math.radians(center_lat)))
+
+    ring: list[list[float]] = []
+    for i in range(num_points):
+        angle = 2.0 * math.pi * i / num_points
+        dx = radius_m * math.cos(angle)
+        dy = radius_m * math.sin(angle)
+        ring.append([
+            center_lng + dx * lng_deg_per_m,
+            center_lat + dy * lat_deg_per_m,
+        ])
+    ring.append(ring[0])  # close the ring
+    return ring
+
+
 # ── Node 5: Build GeoJSON output ────────────────────────────────────────
 
 def output_geojson_node(state: dict) -> dict:
@@ -155,25 +180,27 @@ def output_geojson_node(state: dict) -> dict:
     inp = state.get("_input", {})
     features = []
 
-    center_lat = inp.get("leak_point_lat", 30.676)
-    center_lng = inp.get("leak_point_lng", 104.065)
+    center_lat = inp.get("leak_point_lat") or 30.676
+    center_lng = inp.get("leak_point_lng") or 104.065
 
     for i, z in enumerate(zones):
+        radius = z["radius_m"]
+        ring = _circle_polygon(center_lng, center_lat, radius)
         features.append({
             "type": "Feature",
             "properties": {
                 "level": z["level"],
                 "label": z["label"],
                 "description": z["description"],
-                "radius_m": z["radius_m"],
+                "radius_m": radius,
                 "fill": z["color"],
                 "fill-opacity": 0.2,
                 "stroke": z["color"],
                 "stroke-width": 2,
             },
             "geometry": {
-                "type": "Point",
-                "coordinates": [center_lng, center_lat],
+                "type": "Polygon",
+                "coordinates": [ring],
             },
         })
 

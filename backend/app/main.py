@@ -1,17 +1,21 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
+import asyncio
 import time
 
 import structlog
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import chat, health, history
+from app.api.routes import cases, chat, health, history, incidents, topology
 from app.config import get_settings
 from app.logging_config import setup_logging
 
 setup_logging()
 logger = structlog.get_logger()
+
+_HITL_TIMEOUT_MINUTES = 15
+_HITL_POLL_SECONDS = 60  # check every minute
 
 
 @asynccontextmanager
@@ -42,7 +46,36 @@ async def lifespan(app: FastAPI):
             model=settings.openai_model,
             langsmith=settings.langchain_tracing_v2,
         )
+
+        # Phase 6.3.5: background HITL timeout monitor
+        async def _hitl_watchdog():
+            while True:
+                await asyncio.sleep(_HITL_POLL_SECONDS)
+                try:
+                    from app.memory.database import session_factory
+                    from app.memory import repository as repo
+
+                    factory = session_factory()
+                    async with factory() as db:
+                        stalled = await repo.list_stalled_incidents(db, _HITL_TIMEOUT_MINUTES)
+                        for inc in stalled:
+                            logger.warning(
+                                "hitl_timeout_escalation",
+                                incident_id=inc.incident_id,
+                                session_id=inc.session_id,
+                                stalled_minutes=_HITL_TIMEOUT_MINUTES,
+                            )
+                            # Mark as escalated
+                            await repo.update_incident_status(db, inc.incident_id, "escalated")
+                        await db.commit()
+                except Exception as exc:
+                    logger.error("hitl_watchdog_error", error=str(exc))
+
+        watchdog_task = asyncio.create_task(_hitl_watchdog())
+
         yield
+
+        watchdog_task.cancel()
         logger.info("shutdown")
         from app.memory.database import engine as db_engine
 
@@ -83,6 +116,9 @@ def create_app() -> FastAPI:
     app.include_router(health.router, prefix="/api", tags=["health"])
     app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
     app.include_router(history.router, prefix="/api/history", tags=["history"])
+    app.include_router(topology.router, prefix="/api", tags=["topology"])
+    app.include_router(incidents.router, prefix="/api", tags=["incidents"])
+    app.include_router(cases.router, prefix="/api", tags=["cases"])
 
     return app
 

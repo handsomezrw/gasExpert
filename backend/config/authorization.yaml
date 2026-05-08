@@ -1,0 +1,48 @@
+# 半自主授权矩阵（Phase 6.5 HITL 边界）
+# 固定策略，不由 LLM 决定
+
+actions:
+  # ── 查询类 ──
+  query:
+    - topology           # 管网拓扑查询
+    - weather            # 气象查询
+    - inventory          # 物资库存查询
+    - cases              # 案例库检索
+    - regulations        # 规范条款检索（RAG）
+    auto: true
+    approval: false
+
+  # ── 计算类 ──
+  compute:
+    - diffusion_zone     # 扩散范围计算
+    - valve_isolation    # 关阀方案计算（不包含下发）
+    - repair_plan_draft  # 抢修方案起草
+    auto: true
+    approval: false
+
+  # ── 地图预览类 ──
+  map_preview:
+    - overlay_push       # 地图图层回写（标记为"预览"）
+    auto: true
+    approval: false
+
+  # ── HITL 审批类 ──
+  hitl_required:
+    - scada_dispatch     # SCADA 关阀指令下发
+      approval_type: valve_preview
+      prompt: "方案预览：请审批关阀序列"
+    - work_order_dispatch  # 工单派发到人
+      approval_type: repair_review
+      prompt: "请审批抢修方案并确认下发工单"
+    - external_notification  # 对外通知（消防/居民短信）
+      approval_type: external_notify
+      prompt: "确认发送对外通知（需二次确认）"
+      double_confirm: true
+    - case_ingest        # 案例入库
+      approval_type: case_ingest
+      prompt: "确认将本次事故记录入库"
+
+# ── HITL 超时与升级 ──
+timeout:
+  hitl_stall_minutes: 15       # 审批超时自动升级阈值
+  escalation_action: log_warn  # 升级动作：log_warn / email / sms

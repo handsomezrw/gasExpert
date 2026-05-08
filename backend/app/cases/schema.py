@@ -132,6 +132,7 @@ class IncidentCase(BaseModel):
     repair: RepairStage = Field(default_factory=RepairStage)
     recovery: RecoveryStage = Field(default_factory=RecoveryStage)
 
-    # 复盘（预留，Phase 9 接入 jsonl 的 think 字段）
+    # 复盘（Phase 9 接入 jsonl 的 think 字段）
     think_trace: Optional[str] = None
+    answer: Optional[str] = None  # jsonl 中的 answer 字段（完整处置方案）
     lessons_learned: Optional[str] = None

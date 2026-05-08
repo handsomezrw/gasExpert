@@ -120,7 +120,66 @@ def chunk_document(
             })
 
     merged = _merge_small_chunks(chunks, min_size=80, max_size=max_size)
-    return merged
+    filtered = _quality_filter(merged)
+    return filtered
+
+
+# ── Quality filters ────────────────────────────────────────────────────
+
+def _chinese_ratio(text: str) -> float:
+    """Fraction of characters in the CJK Unified Ideographs range."""
+    if not text:
+        return 0.0
+    cjk = sum(1 for ch in text if '一' <= ch <= '鿿')
+    return cjk / len(text)
+
+
+def _toc_score(text: str) -> int:
+    """Count dot-like patterns typical of table-of-contents lines.
+
+    TOC lines look like: "3.2.1 管道巡线检查 ··············· 42"
+    """
+    # Count ellipsis or dot-leader patterns
+    dots = text.count('·') + text.count('…') + text.count('...') + text.count('..')
+    return dots
+
+
+def _quality_filter(chunks: list[dict]) -> list[dict]:
+    """Remove low-quality chunks (garbled OCR, TOC pages, etc.)."""
+    kept: list[dict] = []
+    dropped_garbled = 0
+    dropped_toc = 0
+    dropped_short = 0
+
+    for c in chunks:
+        text = c["text"]
+
+        # 1. Minimum length
+        if len(text) < 20:
+            dropped_short += 1
+            continue
+
+        # 2. Chinese character ratio — garbled OCR produces mostly non-CJK chars
+        if _chinese_ratio(text) < 0.4:
+            dropped_garbled += 1
+            continue
+
+        # 3. Table-of-contents detection — high dot density = TOC page
+        if _toc_score(text) > 8:
+            dropped_toc += 1
+            continue
+
+        kept.append(c)
+
+    if dropped_garbled or dropped_toc or dropped_short:
+        logger.info(
+            "quality_filter",
+            kept=len(kept),
+            dropped_garbled=dropped_garbled,
+            dropped_toc=dropped_toc,
+            dropped_short=dropped_short,
+        )
+    return kept
 
 
 def _split_by_clauses(text: str) -> list[str]:

@@ -1,13 +1,13 @@
-"""Async CRUD for conversation sessions and messages."""
+"""Async CRUD for conversation sessions, messages, and incidents."""
 
 import json
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.memory.models import ConversationSession, Message
+from app.memory.models import ConversationSession, Incident, Message
 
 
 async def ensure_conversation_session(
@@ -85,5 +85,124 @@ async def get_messages_for_session(
         select(Message)
         .where(Message.session_id == session_id)
         .order_by(Message.created_at.asc(), Message.id.asc())
+    )
+    return list(result.scalars().all())
+
+
+async def delete_session(
+    db: AsyncSession,
+    session_id: str,
+) -> bool:
+    """Delete a conversation session and all its messages. Returns True if deleted."""
+    session = await db.execute(
+        select(ConversationSession).where(ConversationSession.session_id == session_id)
+    )
+    row = session.scalar_one_or_none()
+    if row is None:
+        return False
+    await db.delete(row)
+    # Also delete associated messages
+    await db.execute(
+        delete(Message).where(Message.session_id == session_id)
+    )
+    await db.flush()
+    return True
+
+
+# ── Incidents (Phase 6.3) ──────────────────────────────────────────────
+
+async def create_incident(
+    db: AsyncSession,
+    incident_id: str,
+    session_id: str,
+    source: str = "webhook",
+    status: str = "active",
+    payload: dict | None = None,
+) -> Incident:
+    """Create a new incident record."""
+    row = Incident(
+        incident_id=incident_id,
+        session_id=session_id,
+        source=source,
+        status=status,
+        payload_json=json.dumps(payload or {}, ensure_ascii=False),
+    )
+    db.add(row)
+    await db.flush()
+    return row
+
+
+async def find_incident(
+    db: AsyncSession,
+    incident_id: str,
+) -> Incident | None:
+    """Find an incident by its external id (for idempotency check)."""
+    result = await db.execute(
+        select(Incident).where(Incident.incident_id == incident_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def list_incidents(
+    db: AsyncSession,
+    status: str | None = None,
+) -> list[Incident]:
+    """List incidents, newest first. Optionally filter by status."""
+    stmt = select(Incident).order_by(Incident.created_at.desc())
+    if status:
+        stmt = stmt.where(Incident.status == status)
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def update_incident_status(
+    db: AsyncSession,
+    incident_id: str,
+    status: str,
+) -> Incident | None:
+    """Update incident status and return the updated row."""
+    row = await find_incident(db, incident_id)
+    if row is None:
+        return None
+    row.status = status
+    row.updated_at = datetime.utcnow()
+    await db.flush()
+    return row
+
+
+async def set_incident_hitl(db: AsyncSession, incident_id: str) -> Incident | None:
+    """Mark an incident as waiting for HITL approval."""
+    row = await find_incident(db, incident_id)
+    if row is None:
+        return None
+    row.hitl_since = datetime.utcnow()
+    row.updated_at = datetime.utcnow()
+    await db.flush()
+    return row
+
+
+async def clear_incident_hitl(db: AsyncSession, incident_id: str) -> Incident | None:
+    """Clear HITL timestamp (approval received)."""
+    row = await find_incident(db, incident_id)
+    if row is None:
+        return None
+    row.hitl_since = None
+    row.updated_at = datetime.utcnow()
+    await db.flush()
+    return row
+
+
+async def list_stalled_incidents(
+    db: AsyncSession,
+    timeout_minutes: int = 15,
+) -> list[Incident]:
+    """Find incidents stuck in HITL for longer than the timeout."""
+    from datetime import timedelta
+    cutoff = datetime.utcnow() - timedelta(minutes=timeout_minutes)
+    result = await db.execute(
+        select(Incident)
+        .where(Incident.hitl_since.isnot(None))
+        .where(Incident.hitl_since < cutoff)
+        .where(Incident.status == "active")
     )
     return list(result.scalars().all())

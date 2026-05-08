@@ -17,7 +17,7 @@ import asyncio
 import structlog
 from fastapi import APIRouter, Depends, Request
 from langchain_core.messages import HumanMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from app.api.deps import get_app_settings
@@ -127,6 +127,12 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
 
 
+class ApproveRequest(BaseModel):
+    session_id: str = Field(description="会话 ID（对应 incident session）")
+    approved: bool = Field(description="是否批准")
+    reason: str | None = Field(None, description="驳回原因")
+
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 def _uid() -> str:
@@ -189,7 +195,38 @@ async def _maybe_push_overlay(skill_name: str, result_data: dict, session_id: st
             client = WebMapClient()
             await client.push_overlay(session_id, geojson, layer_type, title=title)
         except Exception as exc:
-            logger.warning("overlay_push_failed", skill=skill_name, error=str(exc))
+            logger.debug("overlay_push_skipped", skill=skill_name, reason=str(exc)[:120])
+# ── HITL pending store helper (Phase 6.5) ────────────────────────────
+
+def _store_pending_hitl(
+    session_id: str,
+    skill_name: str,
+    skill_cls_name: str,
+    input_args: dict,
+    result_data: dict,
+) -> None:
+    """If a skill returned pending, persist it so the approve endpoint can resume."""
+    if not result_data.get("pending"):
+        return
+    try:
+        from app.memory.hitl_store import get_hitl_store, PendingApproval
+
+        store = get_hitl_store()
+        pa = PendingApproval(
+            session_id=session_id,
+            skill_name=skill_name,
+            approval_type=result_data.get("approval_type", ""),
+            approval_prompt=result_data.get("approval_prompt", ""),
+            preview_payload=result_data.get("preview_payload") or {},
+            skill_cls_name=skill_cls_name,
+            input_args=input_args,
+            partial_state=result_data.get("_resume_state") or {},
+        )
+        asyncio.ensure_future(store.set_pending(session_id, pa))
+    except Exception as exc:
+        logger.warning("hitl_store_failed", error=str(exc))
+
+
 # ── Panel data mapping ──────────────────────────────────────────────
 
 _PANEL_MAP = {
@@ -197,9 +234,10 @@ _PANEL_MAP = {
     "query_material_inventory": "inventory",
     "get_weather_info": "weather",
     "generate_report": "report",
-    "valve_isolation": "evacuation",
+    "valve_isolation": "valve_isolation",
     "diffusion_zone": "evacuation",
     "repair_plan": "report",
+    "case_recall": "case_recall",
 }
 
 
@@ -278,24 +316,57 @@ async def _stream_events(
             # ── Tool executor completed ───────────────────────────
             elif kind == "on_chain_end" and node == "tool_executor":
                 out = ev["data"].get("output")
-                if not isinstance(out, dict) or "tool_results" not in out:
+                if not isinstance(out, dict):
                     continue
-                results = out["tool_results"]
-                new_results = results[emitted_tool_count:]
-                emitted_tool_count = len(results)
-                for tr in new_results:
-                    has_err = "error" in tr
-                    yield _sse("tool_end", {
-                        "id": _uid(),
-                        "name": tr.get("tool", "unknown"),
-                        "args": tr.get("args", {}),
-                        "status": "error" if has_err else "done",
-                        "result": tr.get("result") or tr.get("error"),
-                        "timestamp": _ts(),
-                    })
-                    panel = _maybe_panel(tr)
-                    if panel:
-                        yield panel
+                # Tool results
+                if "tool_results" in out:
+                    results = out["tool_results"]
+                    new_results = results[emitted_tool_count:]
+                    emitted_tool_count = len(results)
+                    for tr in new_results:
+                        has_err = "error" in tr
+                        yield _sse("tool_end", {
+                            "id": _uid(),
+                            "name": tr.get("tool", "unknown"),
+                            "args": tr.get("args", {}),
+                            "status": "error" if has_err else "done",
+                            "result": tr.get("result") or tr.get("error"),
+                            "timestamp": _ts(),
+                        })
+                        panel = _maybe_panel(tr)
+                        if panel:
+                            yield panel
+                # Skill results from tool→skill rerouting
+                if "skill_results" in out:
+                    for sr in out["skill_results"]:
+                        has_err = "error" in sr
+                        result_data = sr.get("result", {})
+                        yield _sse("tool_end", {
+                            "id": _uid(),
+                            "name": sr.get("skill", "unknown"),
+                            "args": sr.get("args", {}),
+                            "status": "error" if has_err else "done",
+                            "result": result_data,
+                            "timestamp": _ts(),
+                        })
+                        skill_name = sr.get("skill", "")
+                        panel_type = _PANEL_MAP.get(skill_name)
+                        actual_output = (result_data.get("output") or {}) if isinstance(result_data, dict) else {}
+                        pending = result_data.get("pending", False) if isinstance(result_data, dict) else False
+                        preview = (result_data.get("preview_payload") or {}) if isinstance(result_data, dict) else {}
+                        panel_data = actual_output if actual_output else preview
+                        if panel_type and panel_data:
+                            yield _sse("panel_data", {
+                                "type": panel_type,
+                                "data": {"skill": skill_name, "pending": pending, "session_id": session_id, **panel_data},
+                            })
+                        if pending:
+                            _store_pending_hitl(
+                                session_id=session_id, skill_name=skill_name,
+                                skill_cls_name=skill_name,
+                                input_args=sr.get("args", {}), result_data=result_data,
+                            )
+                        _ = asyncio.ensure_future(_maybe_push_overlay(skill_name, actual_output, session_id))
 
             # ── Skill executor completed (Phase 6.1) ──────────────
             elif kind == "on_chain_end" and node == "skill_executor":
@@ -315,15 +386,49 @@ async def _stream_events(
                     })
                     skill_name = sr.get("skill", "")
                     panel_type = _PANEL_MAP.get(skill_name)
-                    if panel_type and result_data:
+                    # Unwrap SkillResult: data is in "output" (completed) or "preview_payload" (pending HITL)
+                    actual_output = (result_data.get("output") or {}) if isinstance(result_data, dict) else {}
+                    pending = result_data.get("pending", False) if isinstance(result_data, dict) else False
+                    preview = (result_data.get("preview_payload") or {}) if isinstance(result_data, dict) else {}
+                    panel_data = actual_output if actual_output else preview
+                    if panel_type and panel_data:
                         yield _sse("panel_data", {
                             "type": panel_type,
-                            "data": {"skill": skill_name, **result_data},
+                            "data": {
+                                "skill": skill_name,
+                                "pending": pending,
+                                "session_id": session_id,
+                                **panel_data,
+                            },
                         })
+                    # Phase 6.5: if pending, store for later resume
+                    if pending:
+                        _store_pending_hitl(
+                            session_id=session_id,
+                            skill_name=skill_name,
+                            skill_cls_name=skill_name,
+                            input_args=sr.get("args", {}),
+                            result_data=result_data,
+                        )
                     # Phase 6.2: auto-push overlay to Web map
                     _ = asyncio.ensure_future(
-                        _maybe_push_overlay(skill_name, result_data, session_id)
+                        _maybe_push_overlay(skill_name, actual_output, session_id)
                     )
+
+            # ── Case recall completed (Phase 6.4) ─────────────────
+            elif kind == "on_chain_end" and node == "case_recall":
+                out = ev["data"].get("output")
+                if not isinstance(out, dict) or "retrieved_docs" not in out:
+                    continue
+                docs = out["retrieved_docs"]
+                # Find case recall docs (those starting with "## 相似历史事故")
+                for doc in docs:
+                    if isinstance(doc, str) and "相似历史事故" in doc:
+                        yield _sse("panel_data", {
+                            "type": "case_recall",
+                            "data": {"content": doc},
+                        })
+                        break
 
             # ── RAG retriever completed ───────────────────────────
             elif kind == "on_chain_end" and node == "rag_retriever":
@@ -410,6 +515,36 @@ async def _stream_updates(
                         panel = _maybe_panel(tr)
                         if panel:
                             yield panel
+                    # Also handle skill results from tool→skill rerouting
+                    for sr in out.get("skill_results") or []:
+                        has_err = "error" in sr
+                        result_data = sr.get("result", {})
+                        yield _sse("tool_end", {
+                            "id": _uid(),
+                            "name": sr.get("skill", "unknown"),
+                            "args": sr.get("args", {}),
+                            "status": "error" if has_err else "done",
+                            "result": result_data,
+                            "timestamp": _ts(),
+                        })
+                        skill_name = sr.get("skill", "")
+                        panel_type = _PANEL_MAP.get(skill_name)
+                        actual_output = (result_data.get("output") or {}) if isinstance(result_data, dict) else {}
+                        pending = result_data.get("pending", False) if isinstance(result_data, dict) else False
+                        preview = (result_data.get("preview_payload") or {}) if isinstance(result_data, dict) else {}
+                        panel_data = actual_output if actual_output else preview
+                        if panel_type and panel_data:
+                            yield _sse("panel_data", {
+                                "type": panel_type,
+                                "data": {"skill": skill_name, "pending": pending, "session_id": session_id, **panel_data},
+                            })
+                        if pending:
+                            _store_pending_hitl(
+                                session_id=session_id, skill_name=skill_name,
+                                skill_cls_name=skill_name,
+                                input_args=sr.get("args", {}), result_data=result_data,
+                            )
+                        _ = asyncio.ensure_future(_maybe_push_overlay(skill_name, actual_output, session_id))
 
                 elif node_name == "skill_executor":
                     for sr in out.get("skill_results") or []:
@@ -425,15 +560,43 @@ async def _stream_updates(
                         })
                         skill_name = sr.get("skill", "")
                         panel_type = _PANEL_MAP.get(skill_name)
-                        if panel_type and result_data:
+                        # Unwrap SkillResult: data is in "output" (completed) or "preview_payload" (pending HITL)
+                        actual_output = (result_data.get("output") or {}) if isinstance(result_data, dict) else {}
+                        pending = result_data.get("pending", False) if isinstance(result_data, dict) else False
+                        preview = (result_data.get("preview_payload") or {}) if isinstance(result_data, dict) else {}
+                        panel_data = actual_output if actual_output else preview
+                        if panel_type and panel_data:
                             yield _sse("panel_data", {
                                 "type": panel_type,
-                                "data": {"skill": skill_name, **result_data},
+                                "data": {
+                                    "skill": skill_name,
+                                    "pending": pending,
+                                    "session_id": session_id,
+                                    **panel_data,
+                                },
                             })
+                        if pending:
+                            _store_pending_hitl(
+                                session_id=session_id,
+                                skill_name=skill_name,
+                                skill_cls_name=skill_name,
+                                input_args=sr.get("args", {}),
+                                result_data=result_data,
+                            )
                         # Phase 6.2: auto-push overlay to Web map
                         _ = asyncio.ensure_future(
-                            _maybe_push_overlay(skill_name, result_data, session_id)
+                            _maybe_push_overlay(skill_name, actual_output, session_id)
                         )
+
+                elif node_name == "case_recall":
+                    docs = out.get("retrieved_docs") or []
+                    for doc in docs:
+                        if isinstance(doc, str) and "相似历史事故" in doc:
+                            yield _sse("panel_data", {
+                                "type": "case_recall",
+                                "data": {"content": doc},
+                            })
+                            break
 
                 elif node_name == "rag_retriever":
                     docs = out.get("retrieved_docs") or []
@@ -516,3 +679,127 @@ async def stream_chat(
         _event_generator(request_body, graph, settings),
         media_type="text/event-stream",
     )
+
+
+@router.get("/stream/{session_id}")
+async def watch_session(
+    session_id: str,
+    http_request: Request,
+):
+    """Watch an existing session's progress (Phase 6.3 multi-terminal sync).
+
+    Streams historical messages as replay events, then stays open for live updates.
+    Clients that share a session_id see the same incident progress.
+    """
+    factory = session_factory()
+
+    async def _replay_and_watch() -> AsyncGenerator[dict, None]:
+        # 1. Replay existing messages from DB
+        try:
+            async with factory() as db:
+                msgs = await repo.get_messages_for_session(db, session_id)
+                for msg in msgs:
+                    extra = {}
+                    try:
+                        extra = json.loads(msg.metadata_json or "{}")
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    if msg.role == "user":
+                        yield _sse("token", {"content": ""})  # no-op token
+                    elif msg.role == "assistant":
+                        yield _sse("token", {"content": msg.content})
+                        # Replay tool calls
+                        for tc in extra.get("toolCalls", []):
+                            yield _sse("tool_end", tc)
+                        # Replay panel data
+                        for pd in extra.get("panelData", []):
+                            yield _sse("panel_data", pd)
+        except Exception as exc:
+            logger.warning("watch_replay_failed", session_id=session_id, error=str(exc))
+
+        # 2. Keep connection open, polling for new messages
+        last_msg_count = 0
+        while True:
+            try:
+                async with factory() as db:
+                    msgs = await repo.get_messages_for_session(db, session_id)
+                    if len(msgs) > last_msg_count:
+                        # Send new messages
+                        for msg in msgs[last_msg_count:]:
+                            if msg.role == "assistant":
+                                yield _sse("token", {"content": msg.content})
+                        last_msg_count = len(msgs)
+                await asyncio.sleep(2)
+            except Exception:
+                await asyncio.sleep(5)
+
+    return EventSourceResponse(
+        _replay_and_watch(),
+        media_type="text/event-stream",
+    )
+
+
+# ── HITL approve endpoint (Phase 6.5) ──────────────────────────────────
+
+@router.post("/approve")
+async def approve_hitl(
+    body: ApproveRequest,
+    http_request: Request,
+):
+    """Approve or reject a pending HITL checkpoint.
+
+    On approval: resumes the paused skill with ``resume_approval``,
+    adds the skill output to the chat stream, and triggers the reflector
+    to continue the agent loop.
+    """
+    from app.memory.hitl_store import get_hitl_store
+
+    store = get_hitl_store()
+
+    # Check if there's a pending approval
+    pa = await store.get_pending(body.session_id)
+    if pa is None:
+        return {"status": "no_pending", "message": "没有待审批的项目"}
+
+    # Resume the skill
+    result = await store.resume_with(
+        body.session_id,
+        approved=body.approved,
+        reason=body.reason,
+    )
+
+    if result is None:
+        return {"status": "error", "message": "审批恢复失败"}
+
+    # If approved and skill completed, run reflector → responder
+    if body.approved and not result.get("pending") and not result.get("rejected"):
+        graph = http_request.app.state.agent_graph
+        config = {"configurable": {"thread_id": body.session_id}}
+
+        # Get current agent state
+        state_snapshot = await graph.aget_state(config)
+        if state_snapshot and state_snapshot.values:
+            agent_state = dict(state_snapshot.values)
+            # Append the resumed skill output
+            skill_results = list(agent_state.get("skill_results") or [])
+            skill_results.append({
+                "skill": pa.skill_name,
+                "args": pa.input_args,
+                "result": result,
+            })
+            agent_state["skill_results"] = skill_results
+            agent_state["current_plan"] = ""  # reset so reflector runs
+
+            # Re-enter the agent graph (skip planner → go to reflector)
+            try:
+                async for ev in graph.astream(agent_state, config=config):
+                    pass  # Events handled by watch endpoint / SSE subscribers
+            except Exception as exc:
+                logger.error("approve_resume_failed",
+                            session_id=body.session_id, error=str(exc))
+
+    return {
+        "status": "approved" if body.approved else "rejected",
+        "session_id": body.session_id,
+        "result": result,
+    }

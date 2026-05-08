@@ -23,6 +23,7 @@ class TopologyGraph:
         self._g: nx.Graph = nx.Graph()
         self._nodes: dict[str, Node] = {}
         self._pipelines: dict[str, Pipeline] = {}
+        self._pipeline_aliases: dict[str, str] = {}  # alias → canonical id
 
     # ---- 构建 ----
     def add_node(self, node: Node) -> None:
@@ -40,7 +41,20 @@ class TopologyGraph:
         return self._nodes.get(node_id)
 
     def get_pipeline(self, pipeline_id: str) -> Pipeline | None:
-        return self._pipelines.get(pipeline_id)
+        # Try exact match first, then alias lookup
+        if pipeline_id in self._pipelines:
+            return self._pipelines[pipeline_id]
+        canonical = self._pipeline_aliases.get(pipeline_id)
+        if canonical:
+            return self._pipelines.get(canonical)
+        # Case-insensitive fallback
+        upper = pipeline_id.upper()
+        if upper in self._pipelines:
+            return self._pipelines[upper]
+        canonical = self._pipeline_aliases.get(upper)
+        if canonical:
+            return self._pipelines.get(canonical)
+        return None
 
     @property
     def graph(self) -> nx.Graph:
@@ -136,7 +150,7 @@ def load_demo_topology() -> TopologyGraph:
     t.add_node(Valve(id="V5", lng=104.066, lat=30.674, label="V5 主干阀",
                      status=ValveStatus.OPEN, remote_controllable=True))
 
-    # pipelines
+    # pipelines — also expose human-friendly aliases for LLM-generated IDs
     t.add_pipeline(Pipeline(id="P1", node_a="SRC1", node_b="V1", pressure_class="中压",
                             material="PE管", diameter="De110", length_m=180,
                             downstream_users=120))
@@ -167,4 +181,11 @@ def load_demo_topology() -> TopologyGraph:
     t.add_pipeline(Pipeline(id="P8b", node_a="V4", node_b="SRC2", pressure_class="中压",
                             material="钢管", diameter="DN100", length_m=80,
                             downstream_users=0))
+
+    # Aliases for LLM-generated pipeline IDs (map to canonical demo IDs)
+    t._pipeline_aliases["ZG-001"] = "P3"   # 新都花园支线
+    t._pipeline_aliases["P001"] = "P1"     # LLM 补零变体
+    t._pipeline_aliases["P002"] = "P2"
+    t._pipeline_aliases["P003"] = "P3"
+    t._pipeline_aliases["P004"] = "P4"
     return t

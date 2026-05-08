@@ -189,14 +189,17 @@ def link(
             candidates = [i for _, i in scored[:1]]
 
         think = None
+        answer = None
         matched_idx = None
         if candidates:
             matched_idx = candidates[0]
             used_idx.add(matched_idx)
             think = jsonl_records[matched_idx].get("think")
+            answer = jsonl_records[matched_idx].get("answer")
 
         c2 = dict(c)
         c2["think_trace"] = think
+        c2["answer"] = answer
         c2["summary"] = build_summary(c2)
         c2["summary_vec"] = feature_hash_vector(c2)
         enriched.append(c2)

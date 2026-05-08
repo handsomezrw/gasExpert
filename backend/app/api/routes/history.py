@@ -62,3 +62,13 @@ async def get_session(session_id: str, db: AsyncSession = Depends(get_async_sess
         "session_id": session_id,
         "messages": [_message_to_api(m) for m in messages],
     }
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_session(session_id: str, db: AsyncSession = Depends(get_async_session)):
+    """Delete a session and all its messages."""
+    deleted = await repo.delete_session(db, session_id)
+    if not deleted:
+        return {"deleted": False, "message": "会话不存在"}
+    await db.commit()
+    return {"deleted": True, "session_id": session_id}

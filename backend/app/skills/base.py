@@ -147,7 +147,8 @@ class Skill(ABC, Generic[TInput, TOutput]):
         try:
             final_state = await _ainvoke_any(graph, state)
         except HITLPending as p:
-            return SkillResult(
+            # Preserve partial state for later resume
+            pending_result = SkillResult(
                 skill_name=self.name,
                 pending=True,
                 approval_type=p.approval_type,
@@ -155,6 +156,11 @@ class Skill(ABC, Generic[TInput, TOutput]):
                 preview_payload=p.preview_payload,
                 approval_history=state.get("_approval_history", []),
             )
+            # Stash resume state in extra fields (used by HITLStore)
+            # _resume_state contains the accumulated node outputs before HITL
+            pending_result._resume_state = {k: v for k, v in state.items()  # noqa: SLF001
+                                            if not k.startswith("_approval")}
+            return pending_result
         except HITLRejected as r:
             return SkillResult(
                 skill_name=self.name,
@@ -183,7 +189,23 @@ class Skill(ABC, Generic[TInput, TOutput]):
 
 
 async def _ainvoke_any(graph: Any, state: dict) -> dict:
-    """Support both LangGraph compiled graphs and plain async callables."""
+    """Support both LangGraph compiled graphs and plain async callables.
+
+    Uses ``astream`` for compiled graphs so that partial state is accumulated
+    node-by-node.  If a node raises ``HITLPending``, the caller can capture
+    the accumulated state for later resume via ``state_override``.
+    """
+    if hasattr(graph, "astream"):
+        accumulated = dict(state)
+        try:
+            async for event in graph.astream(state):
+                for _node_name, update in event.items():
+                    if isinstance(update, dict):
+                        accumulated.update(update)
+            return accumulated
+        except HITLPending:
+            # Re-raise so the caller can capture accumulated state
+            raise
     if hasattr(graph, "ainvoke"):
         return await graph.ainvoke(state)
     if hasattr(graph, "invoke"):

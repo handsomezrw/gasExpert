@@ -3,9 +3,24 @@ from __future__ import annotations
 
 from typing import Literal, TypedDict
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from app.skills.base import SkillInput, SkillOutput
+
+# Canonical leak type values — LLM-generated aliases are mapped via validator
+_LEAK_TYPE_VALUES = {"pinhole", "crack", "rupture"}
+
+_LEAK_ALIASES: dict[str, str] = {
+    # pinhole
+    "hole": "pinhole", "small": "pinhole", "tiny": "pinhole",
+    "pin_hole": "pinhole", "针孔": "pinhole",
+    # crack
+    "cracked": "crack", "moderate": "crack", "medium": "crack",
+    "mid": "crack", "裂缝": "crack",
+    # rupture
+    "burst": "rupture", "large": "rupture", "big": "rupture",
+    "major": "rupture", "破裂": "rupture",
+}
 
 
 class DiffusionZoneInput(SkillInput):
@@ -13,12 +28,27 @@ class DiffusionZoneInput(SkillInput):
     location: str = Field(description="事故发生位置")
     pressure: float = Field(description="管道压力 (MPa)")
     diameter: float = Field(description="管道直径 (mm)")
-    leak_type: Literal["pinhole", "crack", "rupture"] = Field(description="泄漏类型")
+    leak_type: str = Field(description="泄漏类型: pinhole / crack / rupture")
     is_indoor: bool = Field(False, description="是否为室内泄漏")
     wind_speed: float | None = Field(None, description="已知风速 (km/h)，不提供则自动拉取")
     leak_point_lat: float | None = Field(None, description="泄漏点纬度")
     leak_point_lng: float | None = Field(None, description="泄漏点经度")
     timestamp: str | None = Field(None, description="事故时间")
+
+    @field_validator("leak_type", mode="before")
+    @classmethod
+    def _normalize_leak_type(cls, v: str) -> str:
+        v = str(v).strip().lower()
+        if v in _LEAK_TYPE_VALUES:
+            return v
+        if v in _LEAK_ALIASES:
+            return _LEAK_ALIASES[v]
+        # Fuzzy match: if v contains any canonical value, use it
+        for canonical in _LEAK_TYPE_VALUES:
+            if canonical in v:
+                return canonical
+        # Default fallback
+        return "crack"
 
 
 class DiffusionZoneOutput(SkillOutput):

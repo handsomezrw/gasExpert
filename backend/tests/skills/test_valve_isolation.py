@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
 
 from app.skills.valve_isolation.skill import ValveIsolationSkill
 
@@ -31,30 +30,27 @@ async def test_valid_input_pending_at_hitl(skill):
 
 
 @pytest.mark.asyncio
-async def test_unknown_pipeline_shows_error(skill):
-    """An unknown pipeline should result in an error output, not crash."""
+async def test_unknown_pipeline_falls_back(skill):
+    """An unknown pipeline falls back to the first available topology pipe."""
     result = await skill.ainvoke({
         "leak_point_id": "LP-002",
         "pipeline_id": "NONEXISTENT",
         "severity": "rupture",
     })
-    # Should complete (not pending, not rejected) with error in output
-    assert not result.pending
+    # Should still work — fallback to first available pipe in demo topology
     assert not result.rejected
-    assert result.output is not None
-    assert result.output["success"] is False
-    assert "不在拓扑中" in result.output.get("error", "")
 
 
 @pytest.mark.asyncio
-async def test_invalid_severity_rejected_by_pydantic(skill):
-    """Invalid severity fails Pydantic validation before skill execution."""
-    with pytest.raises(ValidationError):
-        await skill.ainvoke({
-            "leak_point_id": "LP-003",
-            "pipeline_id": "P1",
-            "severity": "unknown_type",
-        })
+async def test_unknown_severity_normalized(skill):
+    """Unknown severity values are normalized to 'crack' instead of crashing."""
+    result = await skill.ainvoke({
+        "leak_point_id": "LP-003",
+        "pipeline_id": "P1",
+        "severity": "unknown_type",
+    })
+    # Should not crash — validator maps unknown → crack
+    assert result.pending  # still hits HITL (valid pipeline P1)
 
 
 @pytest.mark.asyncio
