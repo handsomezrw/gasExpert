@@ -168,7 +168,11 @@ gas-copilot/
 | `RAG_ENABLE_RERANKER` | 启用 BGE 重排序 | `false` |
 | `LOG_FORMAT` | 强制 JSON 日志 | 自动检测 |
 
-<img width="2277" height="1394" alt="image" src="https://github.com/user-attachments/assets/756a8065-8eff-422b-821a-e10c30c814eb" />
-<img width="2345" height="1399" alt="image" src="https://github.com/user-attachments/assets/46f26485-b272-43a9-9b1e-89ca4db05be0" />
+<img width="1277" height="701" alt="image" src="https://github.com/user-attachments/assets/05602a23-479b-4129-b365-78e4c398ee62" />
+<img width="1276" height="697" alt="image" src="https://github.com/user-attachments/assets/c49d7d40-06ce-4a0f-b323-9cc353a29fb7" />
+<img width="1277" height="682" alt="image" src="https://github.com/user-attachments/assets/1f564139-0218-4de5-b294-c351bc1de8ea" />
+
+
+
 
 
